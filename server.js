@@ -40,7 +40,7 @@ if (!YOUTUBE_API_KEY) {
     console.warn("⚠️ YouTube API key is missing in .env. Falling back to yt-dlp for subtitles.");
 }
 
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+const genAI = new GoogleGenerativeAI({ apiKey: GEMINI_API_KEY });
 const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
 const storage = multer.diskStorage({
