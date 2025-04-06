@@ -171,48 +171,39 @@ async function transcribeAudioAssemblyAI(audioFilePath) {
     }
 }
 
+async function downloadYouTubeAudioPytube(videoUrl, outputFilePath) {
+    try {
+        const { YouTube } = require('pytube'); // Dynamically import pytube
+        const yt = YouTube(videoUrl);
+        const audioStream = yt.streams.filter(only_audio=True).first();
+        if (audioStream) {
+            await new Promise((resolve, reject) => {
+                audioStream.download(output_path=path.dirname(outputFilePath), filename=path.basename(outputFilePath), on_complete=resolve, on_error=reject);
+            });
+            console.log(`Audio downloaded successfully to: ${outputFilePath}`);
+            return true;
+        } else {
+            console.error("No audio stream found for the YouTube video.");
+            return false;
+        }
+    } catch (error) {
+        console.error("Error downloading YouTube audio with pytube:", error);
+        return false;
+    }
+}
+
 app.post("/summarize-youtube", async (req, res) => {
     try {
         const { videoUrl, level } = req.body;
         if (!videoUrl) return res.status(400).json({ error: "No video URL provided" });
 
-        const outputFilePath = path.join(UPLOADS_DIR, `${Date.now()}.wav`);
-        const cookiesFilePath = path.join(__dirname, 'cookies.txt'); // Assuming cookies.txt is in the root
+        const outputFilePath = path.join(UPLOADS_DIR, `${Date.now()}.mp3`); // Using .mp3 directly for pytube
 
-        // Using explicit path to yt-dlp and passing cookies and user-agent
-        const ytCommand = `/opt/render/project/src/bin/yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 --cookies "${cookiesFilePath}" --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" "${videoUrl}"`;
+        const pytubeSuccess = await downloadYouTubeAudioPytube(videoUrl, outputFilePath);
 
-        // Using explicit path to ffmpeg
-        const ffmpegCommand = `/opt/render/project/src/bin/ffmpeg -i "${outputFilePath}" "${outputFilePath}.fixed.mp3"`;
-
-        const ytStartTime = Date.now();
-        await new Promise((resolve, reject) => {
-            exec(ytCommand, (err, stdout, stderr) => {
-                if (err) {
-                    console.error("yt-dlp error:", stderr);
-                    reject(new Error(`Failed to download audio: ${stderr}`));
-                } else {
-                    console.log(`yt-dlp successful (${Date.now() - ytStartTime}ms)`);
-                    resolve();
-                }
-            });
-        });
-
-        const ffmpegStartTime = Date.now();
-        await new Promise((resolve, reject) => {
-            exec(ffmpegCommand, (err, stdout, stderr) => {
-                if (err) {
-                    console.error("ffmpeg error:", stderr);
-                    reject(new Error(`ffmpeg conversion failed: ${stderr}`));
-                } else {
-                    console.log(`ffmpeg successful (${Date.now() - ffmpegStartTime}ms)`);
-                    resolve();
-                }
-            });
-        });
-
-        fs.unlinkSync(outputFilePath);
-        fs.renameSync(`${outputFilePath}.fixed.mp3`, outputFilePath);
+        if (!pytubeSuccess) {
+            return res.status(500).json({ error: "Failed to download audio from YouTube using pytube." });
+        }
 
         const assemblyStartTime = Date.now();
         const transcript = await transcribeAudioAssemblyAI(outputFilePath);
@@ -235,6 +226,7 @@ app.post("/summarize-youtube", async (req, res) => {
 
         const geminiResponse = await processGeminiResponse(result);
         res.json({ transcript: transcript, summary: geminiResponse.text });
+
     } catch (error) {
         console.error("YouTube summarization error:", error);
         res.status(500).json({ error: "Summarization failed" });
