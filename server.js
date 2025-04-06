@@ -176,7 +176,7 @@ app.post("/summarize-youtube", async (req, res) => {
         if (!videoUrl) return res.status(400).json({ error: "No video URL provided" });
 
         const outputFilePath = `${UPLOADS_DIR}/${Date.now()}.wav`;
-        const ytCommand = `yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 "${videoUrl}"`;
+       const ytCommand = `yt-dlp -x --audio-format wav -o "<span class="math-inline">\{outputFilePath\}" \-\-audio\-quality 0 \-\-cookies "/home/ubuntu/ai\-transcriber\-summarizer\-backend/youtube\_cookies\.txt" "</span>{videoUrl}"`;
         const ffmpegCommand = `ffmpeg -i "${outputFilePath}" "${outputFilePath}.fixed.mp3"`;
 
         const ytStartTime = Date.now();
