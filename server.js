@@ -176,9 +176,7 @@ app.post("/summarize-youtube", async (req, res) => {
         if (!videoUrl) return res.status(400).json({ error: "No video URL provided" });
 
         const outputFilePath = `${UPLOADS_DIR}/${Date.now()}.wav`;
-        // Using explicit path to yt-dlp
         const ytCommand = `yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 "${videoUrl}"`;
-        // Using explicit path to ffmpeg
         const ffmpegCommand = `ffmpeg -i "${outputFilePath}" "${outputFilePath}.fixed.mp3"`;
 
         const ytStartTime = Date.now();
@@ -273,9 +271,8 @@ app.post("/transcribe-video", upload.single("video"), async (req, res) => {
         const outputAudioPath = `${UPLOADS_DIR}/${Date.now()}.mp3`;
 
         await new Promise((resolve, reject) => {
-            // Using explicit path to ffmpeg
             exec(
-                `/opt/render/project/src/bin/ffmpeg -i "${audioFilePath}" -acodec mp3 "${outputAudioPath}"`,
+                `ffmpeg -i "${audioFilePath}" -acodec mp3 "${outputAudioPath}"`,
                 (err, stdout, stderr) => {
                     if (err) {
                         console.error("ffmpeg error:", stderr);
