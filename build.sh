@@ -10,16 +10,8 @@ chmod +x bin/yt-dlp
 # Download static ffmpeg
 curl -L https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o bin/ffmpeg.tar.xz
 tar -xf bin/ffmpeg.tar.xz -C bin --strip-components=1 --wildcards '*/ffmpeg'
+# Correct the chmod command for ffmpeg
 chmod +x bin/ffmpeg
 
 echo "yt-dlp and ffmpeg downloaded to ./bin"
 ls -l bin
-
-echo "Installing Python and pip..."
-sudo apt-get update
-sudo apt-get install -y python3 python3-pip
-
-echo "Installing Python dependencies from requirements.txt..."
-pip install -r requirements.txt
-
-echo "Build process complete."
