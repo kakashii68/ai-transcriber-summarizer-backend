@@ -28,7 +28,6 @@
     "path": "^0.12.7",
     "pdf-parse": "^1.1.1",
     "whisper": "^0.2.5",
-    "yt-dlp-exec": "^1.0.2",
-   "ytdl-core": "^4.11.5"
+    "yt-dlp-exec": "^1.0.2"
   }
 }
