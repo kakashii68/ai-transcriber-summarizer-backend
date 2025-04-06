@@ -9,6 +9,7 @@ const { exec } = require("child_process");
 const axios = require("axios");
 const FormData = require('form-data');
 const pdfParse = require('pdf-parse'); // Import pdf-parse
+const path = require('path'); // Import the 'path' module
 
 console.log("Current PATH at runtime:", process.env.PATH); // Added log
 
@@ -175,9 +176,11 @@ app.post("/summarize-youtube", async (req, res) => {
         const { videoUrl, level } = req.body;
         if (!videoUrl) return res.status(400).json({ error: "No video URL provided" });
 
-        const outputFilePath = `${UPLOADS_DIR}/${Date.now()}.wav`;
-        // Using explicit path to yt-dlp
-        const ytCommand = `/opt/render/project/src/bin/yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 "${videoUrl}"`;
+        const outputFilePath = path.join(UPLOADS_DIR, `${Date.now()}.wav`);
+        const cookiesFilePath = path.join(__dirname, 'cookies.txt'); // Assuming cookies.txt is in the root
+
+        // Using explicit path to yt-dlp and passing cookies
+        const ytCommand = `/opt/render/project/src/bin/yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 --cookies "${cookiesFilePath}" "${videoUrl}"`;
         // Using explicit path to ffmpeg
         const ffmpegCommand = `/opt/render/project/src/bin/ffmpeg -i "${outputFilePath}" "${outputFilePath}.fixed.mp3"`;
 
@@ -270,7 +273,7 @@ app.post("/transcribe-video", upload.single("video"), async (req, res) => {
         console.log("Received file:", req.file.originalname);
 
         const audioFilePath = req.file.path;
-        const outputAudioPath = `${UPLOADS_DIR}/${Date.now()}.mp3`;
+        const outputAudioPath = path.join(UPLOADS_DIR, `${Date.now()}.mp3`);
 
         await new Promise((resolve, reject) => {
             // Using explicit path to ffmpeg
