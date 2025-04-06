@@ -8,9 +8,10 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { exec } = require("child_process");
 const axios = require("axios");
 const FormData = require('form-data');
-const pdfParse = require('pdf-parse'); // Import pdf-parse
+const pdfParse = require('pdf-parse');
+const { google } = require('googleapis'); // Import Google API client
 
-console.log("Current PATH at runtime:", process.env.PATH); // Added log
+console.log("Current PATH at runtime:", process.env.PATH);
 
 const app = express();
 const PORT = 5000;
@@ -23,6 +24,7 @@ fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY;
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY; // Add YouTube API key
 
 if (!GEMINI_API_KEY) {
     console.error("❌ Gemini API key is missing! Set it in .env");
@@ -32,6 +34,10 @@ if (!GEMINI_API_KEY) {
 if (!ASSEMBLYAI_API_KEY) {
     console.error("❌ AssemblyAI API key is missing! Set it in .env");
     process.exit(1);
+}
+
+if (!YOUTUBE_API_KEY) {
+    console.warn("⚠️ YouTube API key is missing in .env. Falling back to yt-dlp.");
 }
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
@@ -170,65 +176,121 @@ async function transcribeAudioAssemblyAI(audioFilePath) {
     }
 }
 
+async function summarizeYouTubeWithCaptions(videoId, level) {
+    if (!YOUTUBE_API_KEY) {
+        console.warn("YouTube API key not found. Cannot use captions.");
+        return null;
+    }
+
+    const youtube = google.youtube({ version: 'v3', auth: YOUTUBE_API_KEY });
+
+    try {
+        const captionsListResponse = await youtube.captions.list({
+            part: 'snippet',
+            videoId: videoId,
+        });
+
+        const captionTracks = captionsListResponse.data.items;
+
+        if (captionTracks && captionTracks.length > 0) {
+            // Find the English caption track (you might need more sophisticated logic)
+            const englishCaptionTrack = captionTracks.find(track => track.snippet.language === 'en');
+            const captionId = englishCaptionTrack ? englishCaptionTrack.id : captionTracks[0].id; // Fallback to first if no English
+
+            const captionsDownloadResponse = await youtube.captions.download({
+                id: captionId,
+                tfmt: 'srt', // You can choose other formats like 'vtt'
+            });
+
+            const captionsText = captionsDownloadResponse.data;
+            console.log("YouTube Captions:", captionsText);
+
+            // Now summarize the captionsText using your Gemini model
+            const summaryResult = await summarizeText(captionsText, level);
+            return { summary: summaryResult.text, source: "captions" };
+
+        } else {
+            console.log("No captions found for this video.");
+            return null;
+        }
+
+    } catch (error) {
+        console.error("Error fetching YouTube captions:", error);
+        return null;
+    }
+}
+
+async function summarizeText(text, level) {
+    const chatSession = model.startChat({ generationConfig, history: [] });
+    const prompt = `Provide a concise summary of the following text only, ensuring the output contains only the summary and no extra introductory phrases: ${text}. ${level === "core" ? "Make the summary very short and concise" : level === "concise" ? "Make a detailed summary" : "Make the summary in bullet points"}`;
+    const result = await chatSession.sendMessage(prompt);
+    return await processGeminiResponse(result);
+}
+
 app.post("/summarize-youtube", async (req, res) => {
     try {
         const { videoUrl, level } = req.body;
         if (!videoUrl) return res.status(400).json({ error: "No video URL provided" });
 
-        const outputFilePath = `${UPLOADS_DIR}/${Date.now()}.wav`;
-       const ytCommand = `yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 --cookies "/home/ubuntu/ai-transcriber-summarizer-backend/youtube_cookies.txt" "${videoUrl}"`;
-        const ffmpegCommand = `ffmpeg -i "${outputFilePath}" "${outputFilePath}.fixed.mp3"`;
+        const videoIdMatch = videoUrl.match(/(?:v=|youtu\.be\/)([\w-]+)/);
+        const videoId = videoIdMatch ? videoIdMatch[1] : null;
 
-        const ytStartTime = Date.now();
-        await new Promise((resolve, reject) => {
-            exec(ytCommand, (err, stdout, stderr) => {
-                if (err) {
-                    console.error("yt-dlp error:", stderr);
-                    reject(new Error(`Failed to download audio: ${stderr}`));
-                } else {
-                    console.log(`yt-dlp successful (${Date.now() - ytStartTime}ms)`);
-                    resolve();
-                }
+        if (!videoId) {
+            return res.status(400).json({ error: "Invalid YouTube video URL" });
+        }
+
+        const captionsSummary = await summarizeYouTubeWithCaptions(videoId, level);
+
+        if (captionsSummary) {
+            return res.json({ summary: captionsSummary.summary, source: captionsSummary.source });
+        } else {
+            console.log("Falling back to yt-dlp for audio summarization.");
+            const outputFilePath = `${UPLOADS_DIR}/${Date.now()}.wav`;
+            const ytCommand = `yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 --cookies "/home/ubuntu/ai-transcriber-summarizer-backend/youtube_cookies.txt" "${videoUrl}"`;
+            const ffmpegCommand = `ffmpeg -i "${outputFilePath}" "${outputFilePath}.fixed.mp3"`;
+
+            const ytStartTime = Date.now();
+            await new Promise((resolve, reject) => {
+                exec(ytCommand, (err, stdout, stderr) => {
+                    if (err) {
+                        console.error("yt-dlp error:", stderr);
+                        reject(new Error(`Failed to download audio: ${stderr}`));
+                    } else {
+                        console.log(`yt-dlp successful (${Date.now() - ytStartTime}ms)`);
+                        resolve();
+                    }
+                });
             });
-        });
 
-        const ffmpegStartTime = Date.now();
-        await new Promise((resolve, reject) => {
-            exec(ffmpegCommand, (err, stdout, stderr) => {
-                if (err) {
-                    console.error("ffmpeg error:", stderr);
-                    reject(new Error(`ffmpeg conversion failed: ${stderr}`));
-                } else {
-                    console.log(`ffmpeg successful (${Date.now() - ffmpegStartTime}ms)`);
-                    resolve();
-                }
+            const ffmpegStartTime = Date.now();
+            await new Promise((resolve, reject) => {
+                exec(ffmpegCommand, (err, stdout, stderr) => {
+                    if (err) {
+                        console.error("ffmpeg error:", stderr);
+                        reject(new Error(`ffmpeg conversion failed: ${stderr}`));
+                    } else {
+                        console.log(`ffmpeg successful (${Date.now() - ffmpegStartTime}ms)`);
+                        resolve();
+                    }
+                });
             });
-        });
 
-        fs.unlinkSync(outputFilePath);
-        fs.renameSync(`${outputFilePath}.fixed.mp3`, outputFilePath);
+            fs.unlinkSync(outputFilePath);
+            fs.renameSync(`${outputFilePath}.fixed.mp3`, outputFilePath);
 
-        const assemblyStartTime = Date.now();
-        const transcript = await transcribeAudioAssemblyAI(outputFilePath);
-        console.log(`AssemblyAI transcription done (${Date.now() - assemblyStartTime}ms)`);
+            const assemblyStartTime = Date.now();
+            const transcript = await transcribeAudioAssemblyAI(outputFilePath);
+            console.log(`AssemblyAI transcription done (${Date.now() - assemblyStartTime}ms)`);
 
-        fs.unlinkSync(outputFilePath);
+            fs.unlinkSync(outputFilePath);
 
-        console.log("Transcript received, processing with gemini");
+            console.log("Transcript received, processing with gemini");
 
-        const geminiStartTime = Date.now();
-        const chatSession = model.startChat({
-            generationConfig,
-            history: [],
-        });
+            const geminiStartTime = Date.now();
+            const summaryResult = await summarizeText(transcript, level);
+            res.json({ transcript: transcript, summary: summaryResult.text, source: "audio" });
+        }
 
-        const prompt = `Provide a concise summary of the following text only, ensuring the output contains only the summary and no extra introductory phrases: ${transcript}. ${level === "core" ? "Make the summary very short and concise" : level === "concise" ? "Make a detailed summary" : "Make the summary in bullet points"}`;
-
-        const result = await chatSession.sendMessage(prompt);
-        console.log(`Gemini response received (${Date.now() - geminiStartTime}ms)`);
-
-        const geminiResponse = await processGeminiResponse(result);
-        res.json({ transcript: transcript, summary: geminiResponse.text });
     } catch (error) {
         console.error("YouTube summarization error:", error);
         res.status(500).json({ error: "Summarization failed" });
@@ -240,16 +302,8 @@ app.post("/summarize", async (req, res) => {
         const { transcript, level } = req.body;
         if (!transcript) return res.status(400).json({ error: "No text provided" });
 
-        const chatSession = model.startChat({
-            generationConfig,
-            history: [],
-        });
-
-        const prompt = `Provide a concise summary of the following text only, ensuring the output contains only the summary and no extra introductory phrases: ${transcript}. ${level === "core" ? "Make the summary very short and concise" : level === "concise" ? "Make a detailed summary" : "Make the summary in bullet points"}`;
-
-        const result = await chatSession.sendMessage(prompt);
-        const geminiResponse = await processGeminiResponse(result);
-        res.json(geminiResponse);
+        const summaryResult = await summarizeText(transcript, level);
+        res.json(summaryResult);
     } catch (error) {
         console.error("Gemini summarization error:", error);
         res.status(500).json({ error: "Summarization failed" });
@@ -312,16 +366,8 @@ app.post("/upload", upload.single("file"), async (req, res) => {
             fileContent = fs.readFileSync(filePath, "utf-8");
         }
 
-        const chatSession = model.startChat({
-            generationConfig,
-            history: [],
-        });
-
-        const prompt = `Provide a concise summary of the following content only, ensuring the output contains only the summary and no extra introductory phrases: ${fileContent}. ${level === "core" ? "Make the summary very short and concise" : level === "concise" ? "Make a detailed summary" : "Make the summary in bullet points"}`;
-
-        const result = await chatSession.sendMessage(prompt);
-        const geminiResponse = await processGeminiResponse(result);
-        res.json(geminiResponse);
+        const summaryResult = await summarizeText(fileContent, level);
+        res.json(summaryResult);
     } catch (error) {
         console.error("Gemini file processing error:", error);
         res.status(500).json({ error: "File processing failed" });
@@ -331,5 +377,10 @@ app.post("/upload", upload.single("file"), async (req, res) => {
         }
     }
 });
+
+// Initialize the YouTube API client if the API key is available
+if (YOUTUBE_API_KEY) {
+    google.options({ auth: YOUTUBE_API_KEY });
+}
 
 app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PORT}`));
