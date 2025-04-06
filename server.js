@@ -180,7 +180,7 @@ app.post("/summarize-youtube", async (req, res) => {
         const cookiesFilePath = path.join(__dirname, 'cookies.txt'); // Assuming cookies.txt is in the root
 
         // Using explicit path to yt-dlp and passing cookies
-        const ytCommand = `/opt/render/project/src/bin/yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 --cookies "${cookiesFilePath}" --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" "${videoUrl}"`;
+        const ytCommand = `const ytCommand = `/opt/render/project/src/bin/yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 --cookies "${cookiesFilePath}" --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/119.0.0.0 Safari/537.36" "${videoUrl}"`;`;
 
         // Using explicit path to ffmpeg
         const ffmpegCommand = `/opt/render/project/src/bin/ffmpeg -i "${outputFilePath}" "${outputFilePath}.fixed.mp3"`;
