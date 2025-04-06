@@ -10,6 +10,8 @@ const axios = require("axios");
 const FormData = require('form-data');
 const pdfParse = require('pdf-parse'); // Import pdf-parse
 
+console.log("Current PATH at runtime:", process.env.PATH); // Added log
+
 const app = express();
 const PORT = 5000;
 
@@ -91,7 +93,7 @@ async function transcribeAudioAssemblyAI(audioFilePath) {
             filename: 'audio.mp3',
             contentType: 'audio/mpeg'
         });
-        console.log(`Uploading file: ${audioFilePath}`);
+        console.log(`Uploading file to AssemblyAI: ${audioFilePath}`);
         console.log(`File size: ${fs.statSync(audioFilePath).size} bytes`);
         console.log("Form Data Headers:", formData.getHeaders());
     } catch (err) {
@@ -100,6 +102,7 @@ async function transcribeAudioAssemblyAI(audioFilePath) {
     }
 
     try {
+        // Upload the audio file
         const response = await axios.post("https://api.assemblyai.com/v2/upload", formData, {
             headers: formData.getHeaders({ authorization: ASSEMBLYAI_API_KEY }),
         });
@@ -108,6 +111,7 @@ async function transcribeAudioAssemblyAI(audioFilePath) {
 
         const uploadUrl = response.data.upload_url;
 
+        // Request transcription
         const transcriptData = {
             audio_url: uploadUrl,
         };
@@ -119,12 +123,14 @@ async function transcribeAudioAssemblyAI(audioFilePath) {
         );
 
         const transcriptId = transcriptResponse.data.id;
+        console.log(`AssemblyAI Transcript ID: ${transcriptId}`);
 
         let transcriptResult = null;
         let attempts = 0;
         const maxAttempts = 40; // Increased attempts
         const interval = 5000; // Increased interval
 
+        // Poll for the transcription result
         while (!transcriptResult && attempts < maxAttempts) {
             const getTranscriptResponse = await axios.get(
                 `https://api.assemblyai.com/v2/transcript/${transcriptId}`,
@@ -132,12 +138,12 @@ async function transcribeAudioAssemblyAI(audioFilePath) {
             );
 
             console.log(
-                `AssemblyAI transcript status: ${getTranscriptResponse.data.status}`
+                `AssemblyAI transcript status (Attempt ${attempts + 1}): ${getTranscriptResponse.data.status}`
             );
 
             if (getTranscriptResponse.data.status === "completed") {
                 transcriptResult = getTranscriptResponse.data.text;
-                console.log("AssemblyAI transcript received");
+                console.log("AssemblyAI transcript received successfully.");
                 console.log("Transcript: ", transcriptResult);
             } else if (getTranscriptResponse.data.status === "error") {
                 console.error(
@@ -170,8 +176,10 @@ app.post("/summarize-youtube", async (req, res) => {
         if (!videoUrl) return res.status(400).json({ error: "No video URL provided" });
 
         const outputFilePath = `${UPLOADS_DIR}/${Date.now()}.wav`;
-        const ytCommand = `yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 "${videoUrl}"`;
-        const ffmpegCommand = `ffmpeg -i "${outputFilePath}" "${outputFilePath}.fixed.mp3"`;
+        // Using explicit path to yt-dlp
+        const ytCommand = `/opt/render/project/src/bin/yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 "${videoUrl}"`;
+        // Using explicit path to ffmpeg
+        const ffmpegCommand = `/opt/render/project/src/bin/ffmpeg -i "${outputFilePath}" "${outputFilePath}.fixed.mp3"`;
 
         const ytStartTime = Date.now();
         await new Promise((resolve, reject) => {
@@ -259,14 +267,15 @@ app.post("/transcribe-video", upload.single("video"), async (req, res) => {
             return res.status(400).json({ error: "No video file uploaded" });
         }
 
-        console.log("Received file:", req.file);
+        console.log("Received file:", req.file.originalname);
 
         const audioFilePath = req.file.path;
         const outputAudioPath = `${UPLOADS_DIR}/${Date.now()}.mp3`;
 
         await new Promise((resolve, reject) => {
+            // Using explicit path to ffmpeg
             exec(
-                `ffmpeg -i "${audioFilePath}" -acodec mp3 "${outputAudioPath}"`,
+                `/opt/render/project/src/bin/ffmpeg -i "${audioFilePath}" -acodec mp3 "${outputAudioPath}"`,
                 (err, stdout, stderr) => {
                     if (err) {
                         console.error("ffmpeg error:", stderr);
