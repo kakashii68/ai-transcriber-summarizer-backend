@@ -8,11 +8,9 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { exec } = require("child_process");
 const axios = require("axios");
 const FormData = require('form-data');
-const pdfParse = require('pdf-parse');
-const path = require('path');
-const ytdl = require('ytdl-core'); // Import ytdl-core
+const pdfParse = require('pdf-parse'); // Import pdf-parse
 
-console.log("Current PATH at runtime:", process.env.PATH);
+console.log("Current PATH at runtime:", process.env.PATH); // Added log
 
 const app = express();
 const PORT = 5000;
@@ -129,9 +127,10 @@ async function transcribeAudioAssemblyAI(audioFilePath) {
 
         let transcriptResult = null;
         let attempts = 0;
-        const maxAttempts = 40;
-        const interval = 5000;
+        const maxAttempts = 40; // Increased attempts
+        const interval = 5000; // Increased interval
 
+        // Poll for the transcription result
         while (!transcriptResult && attempts < maxAttempts) {
             const getTranscriptResponse = await axios.get(
                 `https://api.assemblyai.com/v2/transcript/${transcriptId}`,
@@ -171,59 +170,51 @@ async function transcribeAudioAssemblyAI(audioFilePath) {
     }
 }
 
-async function downloadYouTubeAudioYtdl(videoUrl, outputDir) {
-    return new Promise((resolve, reject) => {
-        const videoId = ytdl.getVideoID(videoUrl);
-        const audioFormat = 'mp3';
-        const outputFilename = path.join(outputDir, `${Date.now()}.${audioFormat}`);
-
-        const audioReadableStream = ytdl(videoUrl, { filter: 'audioonly', quality: 'highestaudio' });
-
-        const ffmpegCommand = `/opt/render/project/src/bin/ffmpeg -i pipe:0 -vn -acodec libmp3lame "${outputFilename}"`;
-        const ffmpegProcess = exec(ffmpegCommand);
-
-        audioReadableStream.pipe(ffmpegProcess.stdin);
-
-        let stderrData = '';
-        ffmpegProcess.stderr.on('data', (data) => {
-            stderrData += data;
-        });
-
-        ffmpegProcess.on('close', (code) => {
-            if (code === 0) {
-                console.log(`Audio downloaded successfully to: ${outputFilename}`);
-                resolve(outputFilename);
-            } else {
-                console.error(`ffmpeg exited with code ${code}: ${stderrData}`);
-                reject(new Error(`Failed to convert audio: ${stderrData}`));
-            }
-        });
-
-        audioReadableStream.on('error', (err) => {
-            console.error('ytdl-core error:', err);
-            reject(err);
-        });
-    });
-}
-
 app.post("/summarize-youtube", async (req, res) => {
     try {
         const { videoUrl, level } = req.body;
         if (!videoUrl) return res.status(400).json({ error: "No video URL provided" });
 
-        const outputDir = path.join(__dirname, UPLOADS_DIR);
+        const outputFilePath = `${UPLOADS_DIR}/${Date.now()}.wav`;
+        // Using explicit path to yt-dlp
+        const ytCommand = `/opt/render/project/src/bin/yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 "${videoUrl}"`;
+        // Using explicit path to ffmpeg
+        const ffmpegCommand = `/opt/render/project/src/bin/ffmpeg -i "${outputFilePath}" "${outputFilePath}.fixed.mp3"`;
 
-        const audioFilePath = await downloadYouTubeAudioYtdl(videoUrl, outputDir);
+        const ytStartTime = Date.now();
+        await new Promise((resolve, reject) => {
+            exec(ytCommand, (err, stdout, stderr) => {
+                if (err) {
+                    console.error("yt-dlp error:", stderr);
+                    reject(new Error(`Failed to download audio: ${stderr}`));
+                } else {
+                    console.log(`yt-dlp successful (${Date.now() - ytStartTime}ms)`);
+                    resolve();
+                }
+            });
+        });
 
-        if (!audioFilePath) {
-            return res.status(500).json({ error: "Failed to download audio from YouTube using ytdl-core." });
-        }
+        const ffmpegStartTime = Date.now();
+        await new Promise((resolve, reject) => {
+            exec(ffmpegCommand, (err, stdout, stderr) => {
+                if (err) {
+                    console.error("ffmpeg error:", stderr);
+                    reject(new Error(`ffmpeg conversion failed: ${stderr}`));
+                } else {
+                    console.log(`ffmpeg successful (${Date.now() - ffmpegStartTime}ms)`);
+                    resolve();
+                }
+            });
+        });
+
+        fs.unlinkSync(outputFilePath);
+        fs.renameSync(`${outputFilePath}.fixed.mp3`, outputFilePath);
 
         const assemblyStartTime = Date.now();
-        const transcript = await transcribeAudioAssemblyAI(audioFilePath);
+        const transcript = await transcribeAudioAssemblyAI(outputFilePath);
         console.log(`AssemblyAI transcription done (${Date.now() - assemblyStartTime}ms)`);
 
-        fs.unlinkSync(audioFilePath);
+        fs.unlinkSync(outputFilePath);
 
         console.log("Transcript received, processing with gemini");
 
@@ -240,7 +231,6 @@ app.post("/summarize-youtube", async (req, res) => {
 
         const geminiResponse = await processGeminiResponse(result);
         res.json({ transcript: transcript, summary: geminiResponse.text });
-
     } catch (error) {
         console.error("YouTube summarization error:", error);
         res.status(500).json({ error: "Summarization failed" });
@@ -280,9 +270,10 @@ app.post("/transcribe-video", upload.single("video"), async (req, res) => {
         console.log("Received file:", req.file.originalname);
 
         const audioFilePath = req.file.path;
-        const outputAudioPath = path.join(UPLOADS_DIR, `${Date.now()}.mp3`);
+        const outputAudioPath = `${UPLOADS_DIR}/${Date.now()}.mp3`;
 
         await new Promise((resolve, reject) => {
+            // Using explicit path to ffmpeg
             exec(
                 `/opt/render/project/src/bin/ffmpeg -i "${audioFilePath}" -acodec mp3 "${outputAudioPath}"`,
                 (err, stdout, stderr) => {
