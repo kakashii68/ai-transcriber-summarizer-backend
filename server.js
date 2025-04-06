@@ -183,41 +183,99 @@ async function summarizeText(text, level) {
     return await processGeminiResponse(result);
 }
 
+const youtube = google.youtube({
+    version: 'v3',
+    auth: YOUTUBE_API_KEY,
+});
+
 app.post("/summarize-youtube", async (req, res) => {
     try {
         const { videoUrl, level } = req.body;
         if (!videoUrl) return res.status(400).json({ error: "No video URL provided" });
 
-        const subtitlesFile = `${UPLOADS_DIR}/${Date.now()}.srt`;
-        const ytSubtitlesCommand = `yt-dlp --write-sub --skip-download --sub-lang en --output "${subtitlesFile}" "${videoUrl}"`;
+        const videoIdMatch = videoUrl.match(/(?:https?:\/\/)?(?:www\.)?(?:youtu\.be\/|youtube\.com\/(?:embed\/|watch\?v=|v\/))([a-zA-Z0-9_-]+)/);
+        if (!videoIdMatch || !videoIdMatch[1]) {
+            return res.status(400).json({ error: "Invalid YouTube video URL" });
+        }
+        const videoId = videoIdMatch[1];
 
-        const ytSubtitlesStartTime = Date.now();
-        await new Promise((resolve, reject) => {
-            exec(ytSubtitlesCommand, (err, stdout, stderr) => {
-                if (err) {
-                    console.error("yt-dlp subtitles error:", stderr);
-                    reject(new Error(`Failed to extract subtitles: ${stderr}`));
-                } else {
-                    console.log(`yt-dlp subtitles extracted (${Date.now() - ytSubtitlesStartTime}ms)`);
-                    resolve();
-                }
+        if (!YOUTUBE_API_KEY) {
+            console.warn("YouTube API key is missing. Falling back to yt-dlp for subtitles.");
+            const subtitlesFile = `${UPLOADS_DIR}/${Date.now()}.srt`;
+            const ytSubtitlesCommand = `yt-dlp --write-sub --skip-download --sub-lang en --output "${subtitlesFile}" "${videoUrl}"`;
+
+            await new Promise((resolve, reject) => {
+                exec(ytSubtitlesCommand, (err, stdout, stderr) => {
+                    if (err) {
+                        console.error("yt-dlp subtitles error:", stderr);
+                        reject(new Error(`Failed to extract subtitles: ${stderr}`));
+                    } else {
+                        console.log("yt-dlp subtitles extracted");
+                        resolve();
+                    }
+                });
             });
-        });
 
-        let transcript = "";
-        try {
-            transcript = fs.readFileSync(subtitlesFile, 'utf-8');
-            fs.unlinkSync(subtitlesFile);
-        } catch (error) {
-            console.error("Error reading subtitle file:", error);
-            return res.status(500).json({ error: "Could not read extracted subtitles." });
+            let transcript = "";
+            try {
+                transcript = fs.readFileSync(subtitlesFile, 'utf-8');
+                fs.unlinkSync(subtitlesFile);
+            } catch (error) {
+                console.error("Error reading subtitle file:", error);
+                return res.status(500).json({ error: "Could not read extracted subtitles." });
+            }
+            const summaryResult = await summarizeText(transcript, level);
+            return res.json({ summary: summaryResult.text, source: "yt-dlp_subtitles" });
         }
 
-        console.log("Transcript received from yt-dlp subtitles, processing with gemini");
+        const captionListResponse = await youtube.captions.list({
+            part: 'snippet',
+            videoId: videoId,
+        });
 
-        const geminiStartTime = Date.now();
+        const englishCaptionTrack = captionListResponse.data.items.find(
+            (caption) => caption.snippet.language === 'en'
+        );
+
+        if (!englishCaptionTrack) {
+            console.warn("No English captions found for this video. Falling back to yt-dlp.");
+            const subtitlesFile = `${UPLOADS_DIR}/${Date.now()}.srt`;
+            const ytSubtitlesCommand = `yt-dlp --write-sub --skip-download --sub-lang en --output "${subtitlesFile}" "${videoUrl}"`;
+
+            await new Promise((resolve, reject) => {
+                exec(ytSubtitlesCommand, (err, stdout, stderr) => {
+                    if (err) {
+                        console.error("yt-dlp subtitles error:", stderr);
+                        reject(new Error(`Failed to extract subtitles: ${stderr}`));
+                    } else {
+                        console.log("yt-dlp subtitles extracted");
+                        resolve();
+                    }
+                });
+            });
+
+            let transcript = "";
+            try {
+                transcript = fs.readFileSync(subtitlesFile, 'utf-8');
+                fs.unlinkSync(subtitlesFile);
+            } catch (error) {
+                console.error("Error reading subtitle file:", error);
+                return res.status(500).json({ error: "Could not read extracted subtitles." });
+            }
+            const summaryResult = await summarizeText(transcript, level);
+            return res.json({ summary: summaryResult.text, source: "yt-dlp_subtitles" });
+        }
+
+        const captionContentResponse = await youtube.captions.download({
+            id: englishCaptionTrack.id,
+            tfmt: 'text', // Request plain text format
+        });
+
+        const transcript = captionContentResponse.data;
+        console.log("Transcript received from YouTube API, processing with gemini");
+
         const summaryResult = await summarizeText(transcript, level);
-        res.json({ summary: summaryResult.text, source: "yt-dlp_subtitles" });
+        res.json({ summary: summaryResult.text, source: "youtube_api" });
 
     } catch (error) {
         console.error("YouTube summarization error:", error);
@@ -306,7 +364,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     }
 });
 
-// Initialize the YouTube API client if the API key is available (not directly used in this subtitles-only approach)
+// Initialize the YouTube API client if the API key is available
 if (YOUTUBE_API_KEY) {
     google.options({ auth: YOUTUBE_API_KEY });
 }
