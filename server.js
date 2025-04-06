@@ -177,9 +177,9 @@ app.post("/summarize-youtube", async (req, res) => {
 
         const outputFilePath = `${UPLOADS_DIR}/${Date.now()}.wav`;
         // Using explicit path to yt-dlp
-        const ytCommand = `/opt/render/project/src/bin/yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 "${videoUrl}"`;
+        const ytCommand = `yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 "${videoUrl}"`;
         // Using explicit path to ffmpeg
-        const ffmpegCommand = `/opt/render/project/src/bin/ffmpeg -i "${outputFilePath}" "${outputFilePath}.fixed.mp3"`;
+        const ffmpegCommand = `ffmpeg -i "${outputFilePath}" "${outputFilePath}.fixed.mp3"`;
 
         const ytStartTime = Date.now();
         await new Promise((resolve, reject) => {
