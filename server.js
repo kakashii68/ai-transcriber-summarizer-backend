@@ -4,12 +4,12 @@ const cors = require("cors");
 const multer = require("multer");
 const fs = require("fs");
 const mime = require("mime-types");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { GoogleGenerativeAI } = require("@google-ai/generativelanguage").GoogleGenerativeAI;
 const { exec } = require("child_process");
 const axios = require("axios");
 const FormData = require('form-data');
 const pdfParse = require('pdf-parse');
-const { google } = require('googleapis'); // Import Google API client
+const { google } = require('googleapis');
 
 console.log("Current PATH at runtime:", process.env.PATH);
 
@@ -24,7 +24,7 @@ fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY;
-const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY; // Add YouTube API key
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 
 if (!GEMINI_API_KEY) {
     console.error("❌ Gemini API key is missing! Set it in .env");
@@ -37,7 +37,7 @@ if (!ASSEMBLYAI_API_KEY) {
 }
 
 if (!YOUTUBE_API_KEY) {
-    console.warn("⚠️ YouTube API key is missing in .env. Falling back to yt-dlp.");
+    console.warn("⚠️ YouTube API key is missing in .env. Falling back to yt-dlp for subtitles.");
 }
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
@@ -176,50 +176,6 @@ async function transcribeAudioAssemblyAI(audioFilePath) {
     }
 }
 
-async function summarizeYouTubeWithCaptions(videoId, level) {
-    if (!YOUTUBE_API_KEY) {
-        console.warn("YouTube API key not found. Cannot use captions.");
-        return null;
-    }
-
-    const youtube = google.youtube({ version: 'v3', auth: YOUTUBE_API_KEY });
-
-    try {
-        const captionsListResponse = await youtube.captions.list({
-            part: 'snippet',
-            videoId: videoId,
-        });
-
-        const captionTracks = captionsListResponse.data.items;
-
-        if (captionTracks && captionTracks.length > 0) {
-            // Find the English caption track (you might need more sophisticated logic)
-            const englishCaptionTrack = captionTracks.find(track => track.snippet.language === 'en');
-            const captionId = englishCaptionTrack ? englishCaptionTrack.id : captionTracks[0].id; // Fallback to first if no English
-
-            const captionsDownloadResponse = await youtube.captions.download({
-                id: captionId,
-                tfmt: 'srt', // You can choose other formats like 'vtt'
-            });
-
-            const captionsText = captionsDownloadResponse.data;
-            console.log("YouTube Captions:", captionsText);
-
-            // Now summarize the captionsText using your Gemini model
-            const summaryResult = await summarizeText(captionsText, level);
-            return { summary: summaryResult.text, source: "captions" };
-
-        } else {
-            console.log("No captions found for this video.");
-            return null;
-        }
-
-    } catch (error) {
-        console.error("Error fetching YouTube captions:", error);
-        return null;
-    }
-}
-
 async function summarizeText(text, level) {
     const chatSession = model.startChat({ generationConfig, history: [] });
     const prompt = `Provide a concise summary of the following text only, ensuring the output contains only the summary and no extra introductory phrases: ${text}. ${level === "core" ? "Make the summary very short and concise" : level === "concise" ? "Make a detailed summary" : "Make the summary in bullet points"}`;
@@ -232,64 +188,36 @@ app.post("/summarize-youtube", async (req, res) => {
         const { videoUrl, level } = req.body;
         if (!videoUrl) return res.status(400).json({ error: "No video URL provided" });
 
-        const videoIdMatch = videoUrl.match(/(?:v=|youtu\.be\/)([\w-]+)/);
-        const videoId = videoIdMatch ? videoIdMatch[1] : null;
+        const subtitlesFile = `${UPLOADS_DIR}/${Date.now()}.srt`;
+        const ytSubtitlesCommand = `yt-dlp --write-sub --skip-download --sub-lang en --output "${subtitlesFile}" "${videoUrl}"`;
 
-        if (!videoId) {
-            return res.status(400).json({ error: "Invalid YouTube video URL" });
+        const ytSubtitlesStartTime = Date.now();
+        await new Promise((resolve, reject) => {
+            exec(ytSubtitlesCommand, (err, stdout, stderr) => {
+                if (err) {
+                    console.error("yt-dlp subtitles error:", stderr);
+                    reject(new Error(`Failed to extract subtitles: ${stderr}`));
+                } else {
+                    console.log(`yt-dlp subtitles extracted (${Date.now() - ytSubtitlesStartTime}ms)`);
+                    resolve();
+                }
+            });
+        });
+
+        let transcript = "";
+        try {
+            transcript = fs.readFileSync(subtitlesFile, 'utf-8');
+            fs.unlinkSync(subtitlesFile);
+        } catch (error) {
+            console.error("Error reading subtitle file:", error);
+            return res.status(500).json({ error: "Could not read extracted subtitles." });
         }
 
-        const captionsSummary = await summarizeYouTubeWithCaptions(videoId, level);
+        console.log("Transcript received from yt-dlp subtitles, processing with gemini");
 
-        if (captionsSummary) {
-            return res.json({ summary: captionsSummary.summary, source: captionsSummary.source });
-        } else {
-            console.log("Falling back to yt-dlp for audio summarization.");
-            const outputFilePath = `${UPLOADS_DIR}/${Date.now()}.wav`;
-            const ytCommand = `yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 --cookies "/home/ubuntu/ai-transcriber-summarizer-backend/youtube_cookies.txt" "${videoUrl}"`;
-            const ffmpegCommand = `ffmpeg -i "${outputFilePath}" "${outputFilePath}.fixed.mp3"`;
-
-            const ytStartTime = Date.now();
-            await new Promise((resolve, reject) => {
-                exec(ytCommand, (err, stdout, stderr) => {
-                    if (err) {
-                        console.error("yt-dlp error:", stderr);
-                        reject(new Error(`Failed to download audio: ${stderr}`));
-                    } else {
-                        console.log(`yt-dlp successful (${Date.now() - ytStartTime}ms)`);
-                        resolve();
-                    }
-                });
-            });
-
-            const ffmpegStartTime = Date.now();
-            await new Promise((resolve, reject) => {
-                exec(ffmpegCommand, (err, stdout, stderr) => {
-                    if (err) {
-                        console.error("ffmpeg error:", stderr);
-                        reject(new Error(`ffmpeg conversion failed: ${stderr}`));
-                    } else {
-                        console.log(`ffmpeg successful (${Date.now() - ffmpegStartTime}ms)`);
-                        resolve();
-                    }
-                });
-            });
-
-            fs.unlinkSync(outputFilePath);
-            fs.renameSync(`${outputFilePath}.fixed.mp3`, outputFilePath);
-
-            const assemblyStartTime = Date.now();
-            const transcript = await transcribeAudioAssemblyAI(outputFilePath);
-            console.log(`AssemblyAI transcription done (${Date.now() - assemblyStartTime}ms)`);
-
-            fs.unlinkSync(outputFilePath);
-
-            console.log("Transcript received, processing with gemini");
-
-            const geminiStartTime = Date.now();
-            const summaryResult = await summarizeText(transcript, level);
-            res.json({ transcript: transcript, summary: summaryResult.text, source: "audio" });
-        }
+        const geminiStartTime = Date.now();
+        const summaryResult = await summarizeText(transcript, level);
+        res.json({ summary: summaryResult.text, source: "yt-dlp_subtitles" });
 
     } catch (error) {
         console.error("YouTube summarization error:", error);
@@ -378,7 +306,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     }
 });
 
-// Initialize the YouTube API client if the API key is available
+// Initialize the YouTube API client if the API key is available (not directly used in this subtitles-only approach)
 if (YOUTUBE_API_KEY) {
     google.options({ auth: YOUTUBE_API_KEY });
 }
