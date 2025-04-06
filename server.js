@@ -8,10 +8,11 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { exec } = require("child_process");
 const axios = require("axios");
 const FormData = require('form-data');
-const pdfParse = require('pdf-parse'); // Import pdf-parse
-const path = require('path'); // Import the 'path' module
+const pdfParse = require('pdf-parse');
+const path = require('path');
+const ytdl = require('ytdl-core'); // Import ytdl-core
 
-console.log("Current PATH at runtime:", process.env.PATH); // Added log
+console.log("Current PATH at runtime:", process.env.PATH);
 
 const app = express();
 const PORT = 5000;
@@ -128,10 +129,9 @@ async function transcribeAudioAssemblyAI(audioFilePath) {
 
         let transcriptResult = null;
         let attempts = 0;
-        const maxAttempts = 40; // Increased attempts
-        const interval = 5000; // Increased interval
+        const maxAttempts = 40;
+        const interval = 5000;
 
-        // Poll for the transcription result
         while (!transcriptResult && attempts < maxAttempts) {
             const getTranscriptResponse = await axios.get(
                 `https://api.assemblyai.com/v2/transcript/${transcriptId}`,
@@ -171,25 +171,39 @@ async function transcribeAudioAssemblyAI(audioFilePath) {
     }
 }
 
-async function downloadYouTubeAudioPytube(videoUrl, outputFilePath) {
-    try {
-        const { YouTube } = require('pytube'); // Dynamically import pytube
-        const yt = YouTube(videoUrl);
-        const audioStream = yt.streams.filter(only_audio=True).first();
-        if (audioStream) {
-            await new Promise((resolve, reject) => {
-                audioStream.download(output_path=path.dirname(outputFilePath), filename=path.basename(outputFilePath), on_complete=resolve, on_error=reject);
-            });
-            console.log(`Audio downloaded successfully to: ${outputFilePath}`);
-            return true;
-        } else {
-            console.error("No audio stream found for the YouTube video.");
-            return false;
-        }
-    } catch (error) {
-        console.error("Error downloading YouTube audio with pytube:", error);
-        return false;
-    }
+async function downloadYouTubeAudioYtdl(videoUrl, outputDir) {
+    return new Promise((resolve, reject) => {
+        const videoId = ytdl.getVideoID(videoUrl);
+        const audioFormat = 'mp3';
+        const outputFilename = path.join(outputDir, `${Date.now()}.${audioFormat}`);
+
+        const audioReadableStream = ytdl(videoUrl, { filter: 'audioonly', quality: 'highestaudio' });
+
+        const ffmpegCommand = `/opt/render/project/src/bin/ffmpeg -i pipe:0 -vn -acodec libmp3lame "${outputFilename}"`;
+        const ffmpegProcess = exec(ffmpegCommand);
+
+        audioReadableStream.pipe(ffmpegProcess.stdin);
+
+        let stderrData = '';
+        ffmpegProcess.stderr.on('data', (data) => {
+            stderrData += data;
+        });
+
+        ffmpegProcess.on('close', (code) => {
+            if (code === 0) {
+                console.log(`Audio downloaded successfully to: ${outputFilename}`);
+                resolve(outputFilename);
+            } else {
+                console.error(`ffmpeg exited with code ${code}: ${stderrData}`);
+                reject(new Error(`Failed to convert audio: ${stderrData}`));
+            }
+        });
+
+        audioReadableStream.on('error', (err) => {
+            console.error('ytdl-core error:', err);
+            reject(err);
+        });
+    });
 }
 
 app.post("/summarize-youtube", async (req, res) => {
@@ -197,19 +211,19 @@ app.post("/summarize-youtube", async (req, res) => {
         const { videoUrl, level } = req.body;
         if (!videoUrl) return res.status(400).json({ error: "No video URL provided" });
 
-        const outputFilePath = path.join(UPLOADS_DIR, `${Date.now()}.mp3`); // Using .mp3 directly for pytube
+        const outputDir = path.join(__dirname, UPLOADS_DIR);
 
-        const pytubeSuccess = await downloadYouTubeAudioPytube(videoUrl, outputFilePath);
+        const audioFilePath = await downloadYouTubeAudioYtdl(videoUrl, outputDir);
 
-        if (!pytubeSuccess) {
-            return res.status(500).json({ error: "Failed to download audio from YouTube using pytube." });
+        if (!audioFilePath) {
+            return res.status(500).json({ error: "Failed to download audio from YouTube using ytdl-core." });
         }
 
         const assemblyStartTime = Date.now();
-        const transcript = await transcribeAudioAssemblyAI(outputFilePath);
+        const transcript = await transcribeAudioAssemblyAI(audioFilePath);
         console.log(`AssemblyAI transcription done (${Date.now() - assemblyStartTime}ms)`);
 
-        fs.unlinkSync(outputFilePath);
+        fs.unlinkSync(audioFilePath);
 
         console.log("Transcript received, processing with gemini");
 
@@ -269,7 +283,6 @@ app.post("/transcribe-video", upload.single("video"), async (req, res) => {
         const outputAudioPath = path.join(UPLOADS_DIR, `${Date.now()}.mp3`);
 
         await new Promise((resolve, reject) => {
-            // Using explicit path to ffmpeg
             exec(
                 `/opt/render/project/src/bin/ffmpeg -i "${audioFilePath}" -acodec mp3 "${outputAudioPath}"`,
                 (err, stdout, stderr) => {
