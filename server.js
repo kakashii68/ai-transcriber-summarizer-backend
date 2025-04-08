@@ -5,11 +5,11 @@ const cors = require("cors");
 const multer = require("multer");
 const fs = require("fs");
 const mime = require("mime-types");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { exec } = require("child_process");
 const axios = require("axios");
 const FormData = require('form-data');
 const pdfParse = require('pdf-parse'); // Import pdf-parse
+const OpenAI = require('openai'); // Import the OpenAI library
 
 console.log("Current PATH at runtime:", process.env.PATH); // Added log
 
@@ -22,21 +22,31 @@ app.use(express.json());
 const UPLOADS_DIR = "uploads";
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+// Gemini API Key - we won't use this directly now
+// const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY; // Add OpenAI API Key to .env
 
-if (!GEMINI_API_KEY) {
-    console.error("❌ Gemini API key is missing! Set it in .env");
-    process.exit(1);
-}
+// if (!GEMINI_API_KEY) {
+//     console.error("❌ Gemini API key is missing! Set it in .env");
+//     process.exit(1);
+// }
 
 if (!ASSEMBLYAI_API_KEY) {
     console.error("❌ AssemblyAI API key is missing! Set it in .env");
     process.exit(1);
 }
 
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+if (!OPENAI_API_KEY) {
+    console.error("❌ OpenAI API key is missing! Set it in .env");
+    process.exit(1);
+}
+
+// Initialize OpenAI client
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+
+// const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+// const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
 const storage = multer.diskStorage({
     destination: UPLOADS_DIR,
@@ -48,37 +58,17 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage: storage });
 
-const generationConfig = {
-    temperature: 1,
-    topP: 0.95,
-    topK: 40,
-    maxOutputTokens: 8192,
-    responseMimeType: "text/plain",
-};
+// const generationConfig = {
+//     temperature: 1,
+//     topP: 0.95,
+//     topK: 40,
+//     maxOutputTokens: 8192,
+//     responseMimeType: "text/plain",
+// };
 
-async function processGeminiResponse(result) {
-    const candidates = result.response.candidates;
-    let textOutput = result.response.text();
-    let fileOutputs = [];
-
-    for (let candidate_index = 0; candidate_index < candidates.length; candidate_index++) {
-        for (let part_index = 0; part_index < candidates[candidate_index].content.parts.length; part_index++) {
-            const part = candidates[candidate_index].content.parts[part_index];
-            if (part.inlineData) {
-                try {
-                    const filename = `output_${candidate_index}_${part_index}.${mime.extension(part.inlineData.mimeType)}`;
-                    const filePath = `${UPLOADS_DIR}/${filename}`;
-                    fs.writeFileSync(filePath, Buffer.from(part.inlineData.data, "base64"));
-                    console.log(`Output written to: ${filePath}`);
-                    fileOutputs.push({ filename: filename, path: filePath });
-                } catch (err) {
-                    console.error(err);
-                }
-            }
-        }
-    }
-
-    return { text: textOutput, files: fileOutputs };
+async function processOpenAIResponse(response) {
+    let textOutput = response.choices[0].message.content;
+    return { text: textOutput, files: [] }; // OpenAI doesn't directly output files in this context
 }
 
 async function transcribeAudioAssemblyAI(audioFilePath) {
@@ -217,21 +207,20 @@ app.post("/summarize-youtube", async (req, res) => {
 
         fs.unlinkSync(outputFilePath);
 
-        console.log("Transcript received, processing with gemini");
+        console.log("Transcript received, processing with OpenAI");
 
-        const geminiStartTime = Date.now();
-        const chatSession = model.startChat({
-            generationConfig,
-            history: [],
-        });
-
+        const openaiStartTime = Date.now();
         const prompt = `Provide a concise summary of the following text only, ensuring the output contains only the summary and no extra introductory phrases: ${transcript}. ${level === "core" ? "Make the summary very short and concise" : level === "concise" ? "Make a detailed summary" : "Make the summary in bullet points"}`;
 
-        const result = await chatSession.sendMessage(prompt);
-        console.log(`Gemini response received (${Date.now() - geminiStartTime}ms)`);
+        const response = await openai.chat.completions.create({
+            model: "gpt-4o-mini", // You can choose a different OpenAI model
+            messages: [{ role: "user", content: prompt }],
+            max_tokens: 800, // Adjust as needed
+        });
+        console.log(`OpenAI response received (${Date.now() - openaiStartTime}ms)`);
 
-        const geminiResponse = await processGeminiResponse(result);
-        res.json({ transcript: transcript, summary: geminiResponse.text });
+        const openaiResponse = await processOpenAIResponse(response);
+        res.json({ transcript: transcript, summary: openaiResponse.text });
     } catch (error) {
         console.error("YouTube summarization error:", error);
         res.status(500).json({ error: "Summarization failed" });
@@ -243,18 +232,21 @@ app.post("/summarize", async (req, res) => {
         const { transcript, level } = req.body;
         if (!transcript) return res.status(400).json({ error: "No text provided" });
 
-        const chatSession = model.startChat({
-            generationConfig,
-            history: [],
-        });
-
+        console.log("Processing text with OpenAI");
+        const openaiStartTime = Date.now();
         const prompt = `Provide a concise summary of the following text only, ensuring the output contains only the summary and no extra introductory phrases: ${transcript}. ${level === "core" ? "Make the summary very short and concise" : level === "concise" ? "Make a detailed summary" : "Make the summary in bullet points"}`;
 
-        const result = await chatSession.sendMessage(prompt);
-        const geminiResponse = await processGeminiResponse(result);
-        res.json(geminiResponse);
+        const response = await openai.chat.completions.create({
+            model: "gpt-4o-mini", // You can choose a different OpenAI model
+            messages: [{ role: "user", content: prompt }],
+            max_tokens: 800, // Adjust as needed
+        });
+        console.log(`OpenAI response received (${Date.now() - openaiStartTime}ms)`);
+
+        const openaiResponse = await processOpenAIResponse(response);
+        res.json(openaiResponse);
     } catch (error) {
-        console.error("Gemini summarization error:", error);
+        console.error("OpenAI summarization error:", error);
         res.status(500).json({ error: "Summarization failed" });
     }
 });
@@ -316,21 +308,24 @@ app.post("/upload", upload.single("file"), async (req, res) => {
             fileContent = fs.readFileSync(filePath, "utf-8");
         }
 
-        const chatSession = model.startChat({
-            generationConfig,
-            history: [],
-        });
-
+        console.log("Processing uploaded file with OpenAI");
+        const openaiStartTime = Date.now();
         const prompt = `Provide a concise summary of the following content only, ensuring the output contains only the summary and no extra introductory phrases: ${fileContent}. ${level === "core" ? "Make the summary very short and concise" : level === "concise" ? "Make a detailed summary" : "Make the summary in bullet points"}`;
 
-        const result = await chatSession.sendMessage(prompt);
-        const geminiResponse = await processGeminiResponse(result);
+        const response = await openai.chat.completions.create({
+            model: "gpt-4o-mini", // You can choose a different OpenAI model
+            messages: [{ role: "user", content: prompt }],
+            max_tokens: 800, // Adjust as needed
+        });
+        console.log(`OpenAI response received (${Date.now() - openaiStartTime}ms)`);
+
+        const openaiResponse = await processOpenAIResponse(response);
 
         // Send back the original file content in the response
-        res.json({ text: geminiResponse.text, originalContent: fileContent });
+        res.json({ text: openaiResponse.text, originalContent: fileContent });
 
     } catch (error) {
-        console.error("Gemini file processing error:", error);
+        console.error("OpenAI file processing error:", error);
         res.status(500).json({ error: "File processing failed" });
     } finally {
         if (req.file) {
