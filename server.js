@@ -1,3 +1,4 @@
+// Backend (server.js - or your main server file)
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
@@ -177,9 +178,9 @@ app.post("/summarize-youtube", async (req, res) => {
 
         const outputFilePath = `${UPLOADS_DIR}/${Date.now()}.wav`;
         // Using explicit path to yt-dlp
-        const ytCommand = `/opt/render/project/src/bin/yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 "${videoUrl}"`;
+        const ytCommand = `yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 "${videoUrl}"`;
         // Using explicit path to ffmpeg
-        const ffmpegCommand = `/opt/render/project/src/bin/ffmpeg -i "${outputFilePath}" "${outputFilePath}.fixed.mp3"`;
+        const ffmpegCommand = `ffmpeg -i "${outputFilePath}" "${outputFilePath}.fixed.mp3"`;
 
         const ytStartTime = Date.now();
         await new Promise((resolve, reject) => {
@@ -324,7 +325,10 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
         const result = await chatSession.sendMessage(prompt);
         const geminiResponse = await processGeminiResponse(result);
-        res.json(geminiResponse);
+
+        // Send back the original file content in the response
+        res.json({ text: geminiResponse.text, originalContent: fileContent });
+
     } catch (error) {
         console.error("Gemini file processing error:", error);
         res.status(500).json({ error: "File processing failed" });
