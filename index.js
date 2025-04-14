@@ -2,11 +2,15 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
-const fs = require("fs-extra");
-const path = require("path");
+const fs = require("fs");
+const mime = require("mime-types");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { exec } = require("child_process");
 const axios = require("axios");
-const pdfParse = require("pdf-parse");
+const FormData = require('form-data');
+const pdfParse = require('pdf-parse'); // Import pdf-parse
+
+console.log("Current PATH at runtime:", process.env.PATH); // Added log
 
 const app = express();
 const PORT = 5000;
@@ -14,173 +18,321 @@ const PORT = 5000;
 app.use(cors());
 app.use(express.json());
 
-const AUDIO_DIR = path.join(__dirname, "audio");
-const UPLOADS_DIR = path.join(__dirname, "uploads");
-fs.ensureDirSync(AUDIO_DIR);
-fs.ensureDirSync(UPLOADS_DIR);
+const UPLOADS_DIR = "uploads";
+fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY;
+
+if (!GEMINI_API_KEY) {
+    console.error("❌ Gemini API key is missing! Set it in .env");
+    process.exit(1);
+}
+
 if (!ASSEMBLYAI_API_KEY) {
-  console.error("❌ AssemblyAI API key is missing! Set it in .env");
-  process.exit(1);
+    console.error("❌ AssemblyAI API key is missing! Set it in .env");
+    process.exit(1);
 }
 
-const upload = multer({ dest: UPLOADS_DIR });
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
-// Load Transformers for Summarization
-async function loadTransformer() {
-  const { pipeline } = await import("@xenova/transformers");
-  return pipeline;
-}
-
-// Summarization Function
-async function summarizeText(text, level) {
-  const pipeline = await loadTransformer();
-  const summarizer = await pipeline("summarization");
-
-  let maxLen, minLen;
-  if (level === "core") {
-    maxLen = 100;
-    minLen = 50;
-  } else if (level === "concise") {
-    maxLen = 300;
-    minLen = 150;
-  } else {
-    maxLen = 500;
-    minLen = 200;
-  }
-
-  const result = await summarizer(text, { max_length: maxLen, min_length: minLen });
-  return result[0].summary_text;
-}
-
-// 🎙 **Route: Transcribe YouTube Video**
-app.post("/transcribe", async (req, res) => {
-  try {
-    const { videoUrl } = req.body;
-    if (!videoUrl) return res.status(400).json({ error: "No video URL provided" });
-
-    const outputFilePath = path.join(AUDIO_DIR, `${Date.now()}.mp3`);
-    const ytCommand = `yt-dlp -x --audio-format mp3 -o "${outputFilePath}" "${videoUrl}"`;
-
-    console.log("📥 Downloading audio... command:", ytCommand);
-
-    await new Promise((resolve, reject) => {
-      exec(ytCommand, (err, stdout, stderr) => {
-        if (err || stderr) {
-          console.error("yt-dlp error:", stderr);
-          reject(new Error(`Failed to download audio: ${stderr}`));
-        } else {
-          resolve();
-        }
-      });
-    });
-
-    if (!fs.existsSync(outputFilePath)) throw new Error("Audio file not found after download");
-
-    console.log("🔄 Uploading audio to AssemblyAI...");
-    const uploadResponse = await axios.post(
-      "https://api.assemblyai.com/v2/upload",
-      fs.createReadStream(outputFilePath),
-      {
-        headers: {
-          Authorization: ASSEMBLYAI_API_KEY,
-          "Content-Type": "application/octet-stream",
-        },
-      }
-    );
-
-    const audioUrl = uploadResponse.data.upload_url;
-    console.log("📤 File uploaded! URL:", audioUrl);
-
-    console.log("📝 Requesting transcription...");
-    const transcriptResponse = await axios.post(
-      "https://api.assemblyai.com/v2/transcript",
-      { audio_url: audioUrl },
-      {
-        headers: {
-          Authorization: ASSEMBLYAI_API_KEY,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    const transcriptId = transcriptResponse.data.id;
-    console.log("🆔 Transcript ID:", transcriptId);
-
-    let transcriptResult;
-    while (true) {
-      const resultResponse = await axios.get(
-        `https://api.assemblyai.com/v2/transcript/${transcriptId}`,
-        {
-          headers: { Authorization: ASSEMBLYAI_API_KEY },
-        }
-      );
-
-      if (resultResponse.data.status === "completed") {
-        transcriptResult = resultResponse.data.text;
-        break;
-      } else if (resultResponse.data.status === "failed") {
-        throw new Error("Transcription failed: " + JSON.stringify(resultResponse.data));
-      }
-
-      console.log("⏳ Waiting for transcription...");
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-    }
-
-    console.log("✅ Transcription Complete:", transcriptResult);
-    res.json({ transcript: transcriptResult });
-
-    fs.remove(outputFilePath).catch((err) => console.error("❌ Failed to delete file:", err));
-  } catch (error) {
-    console.error("❌ Error:", error.message);
-    res.status(500).json({ error: error.message });
-  }
+const storage = multer.diskStorage({
+    destination: UPLOADS_DIR,
+    filename: (req, file, cb) => {
+        const ext = mime.extension(file.mimetype);
+        cb(null, `${Date.now()}.${ext}`);
+    },
 });
 
-// 📝 **Route: Summarize Transcript**
+const upload = multer({ storage: storage });
+
+const generationConfig = {
+    temperature: 1,
+    topP: 0.95,
+    topK: 40,
+    maxOutputTokens: 8192,
+    responseMimeType: "text/plain",
+};
+
+async function processGeminiResponse(result) {
+    const candidates = result.response.candidates;
+    let textOutput = result.response.text();
+    let fileOutputs = [];
+
+    for (let candidate_index = 0; candidate_index < candidates.length; candidate_index++) {
+        for (let part_index = 0; part_index < candidates[candidate_index].content.parts.length; part_index++) {
+            const part = candidates[candidate_index].content.parts[part_index];
+            if (part.inlineData) {
+                try {
+                    const filename = `output_${candidate_index}_${part_index}.${mime.extension(part.inlineData.mimeType)}`;
+                    const filePath = `${UPLOADS_DIR}/${filename}`;
+                    fs.writeFileSync(filePath, Buffer.from(part.inlineData.data, "base64"));
+                    console.log(`Output written to: ${filePath}`);
+                    fileOutputs.push({ filename: filename, path: filePath });
+                } catch (err) {
+                    console.error(err);
+                }
+            }
+        }
+    }
+
+    return { text: textOutput, files: fileOutputs };
+}
+
+async function transcribeAudioAssemblyAI(audioFilePath) {
+    const headers = {
+        authorization: ASSEMBLYAI_API_KEY,
+        "Content-Type": "multipart/form-data",
+    };
+
+    const formData = new FormData();
+    try {
+        const fileStream = fs.createReadStream(audioFilePath);
+        formData.append("audio_file", fileStream, {
+            filename: 'audio.mp3',
+            contentType: 'audio/mpeg'
+        });
+        console.log(`Uploading file to AssemblyAI: ${audioFilePath}`);
+        console.log(`File size: ${fs.statSync(audioFilePath).size} bytes`);
+        console.log("Form Data Headers:", formData.getHeaders());
+    } catch (err) {
+        console.error("Error reading file:", err);
+        throw err;
+    }
+
+    try {
+        // Upload the audio file
+        const response = await axios.post("https://api.assemblyai.com/v2/upload", formData, {
+            headers: formData.getHeaders({ authorization: ASSEMBLYAI_API_KEY }),
+        });
+
+        console.log("AssemblyAI upload response:", response.data);
+
+        const uploadUrl = response.data.upload_url;
+
+        // Request transcription
+        const transcriptData = {
+            audio_url: uploadUrl,
+        };
+
+        const transcriptResponse = await axios.post(
+            "https://api.assemblyai.com/v2/transcript",
+            transcriptData,
+            { headers: { authorization: ASSEMBLYAI_API_KEY } }
+        );
+
+        const transcriptId = transcriptResponse.data.id;
+        console.log(`AssemblyAI Transcript ID: ${transcriptId}`);
+
+        let transcriptResult = null;
+        let attempts = 0;
+        const maxAttempts = 40; // Increased attempts
+        const interval = 5000; // Increased interval
+
+        // Poll for the transcription result
+        while (!transcriptResult && attempts < maxAttempts) {
+            const getTranscriptResponse = await axios.get(
+                `https://api.assemblyai.com/v2/transcript/${transcriptId}`,
+                { headers: { authorization: ASSEMBLYAI_API_KEY } }
+            );
+
+            console.log(
+                `AssemblyAI transcript status (Attempt ${attempts + 1}): ${getTranscriptResponse.data.status}`
+            );
+
+            if (getTranscriptResponse.data.status === "completed") {
+                transcriptResult = getTranscriptResponse.data.text;
+                console.log("AssemblyAI transcript received successfully.");
+                console.log("Transcript: ", transcriptResult);
+            } else if (getTranscriptResponse.data.status === "error") {
+                console.error(
+                    "AssemblyAI transcription error:",
+                    getTranscriptResponse.data.error
+                );
+                throw new Error(
+                    `AssemblyAI transcription failed: ${getTranscriptResponse.data.error}`
+                );
+            } else {
+                await new Promise((resolve) => setTimeout(resolve, interval));
+                attempts++;
+            }
+        }
+
+        if (!transcriptResult) {
+            throw new Error("AssemblyAI transcription timed out");
+        }
+
+        return transcriptResult;
+    } catch (error) {
+        console.error("AssemblyAI transcription error:", error);
+        throw error;
+    }
+}
+
+app.post("/summarize-youtube", async (req, res) => {
+    try {
+        const { videoUrl, level } = req.body;
+        if (!videoUrl) return res.status(400).json({ error: "No video URL provided" });
+
+        const outputFilePath = `${UPLOADS_DIR}/${Date.now()}.wav`;
+        // Using explicit path to yt-dlp
+        const ytCommand = `yt-dlp -x --audio-format wav -o "${outputFilePath}" --audio-quality 0 "${videoUrl}"`;
+        // Using explicit path to ffmpeg
+        const ffmpegCommand = `/opt/render/project/src/bin/ffmpeg -i "${outputFilePath}" "${outputFilePath}.fixed.mp3"`;
+
+        const ytStartTime = Date.now();
+        await new Promise((resolve, reject) => {
+            exec(ytCommand, (err, stdout, stderr) => {
+                if (err) {
+                    console.error("yt-dlp error:", stderr);
+                    reject(new Error(`Failed to download audio: ${stderr}`));
+                } else {
+                    console.log(`yt-dlp successful (${Date.now() - ytStartTime}ms)`);
+                    resolve();
+                }
+            });
+        });
+
+        const ffmpegStartTime = Date.now();
+        await new Promise((resolve, reject) => {
+            exec(ffmpegCommand, (err, stdout, stderr) => {
+                if (err) {
+                    console.error("ffmpeg error:", stderr);
+                    reject(new Error(`ffmpeg conversion failed: ${stderr}`));
+                } else {
+                    console.log(`ffmpeg successful (${Date.now() - ffmpegStartTime}ms)`);
+                    resolve();
+                }
+            });
+        });
+
+        fs.unlinkSync(outputFilePath);
+        fs.renameSync(`${outputFilePath}.fixed.mp3`, outputFilePath);
+
+        const assemblyStartTime = Date.now();
+        const transcript = await transcribeAudioAssemblyAI(outputFilePath);
+        console.log(`AssemblyAI transcription done (${Date.now() - assemblyStartTime}ms)`);
+
+        fs.unlinkSync(outputFilePath);
+
+        console.log("Transcript received, processing with gemini");
+
+        const geminiStartTime = Date.now();
+        const chatSession = model.startChat({
+            generationConfig,
+            history: [],
+        });
+
+        const prompt = `Provide a concise summary of the following text only, ensuring the output contains only the summary and no extra introductory phrases: ${transcript}. ${level === "core" ? "Make the summary very short and concise" : level === "concise" ? "Make a detailed summary" : "Make the summary in bullet points"}`;
+
+        const result = await chatSession.sendMessage(prompt);
+        console.log(`Gemini response received (${Date.now() - geminiStartTime}ms)`);
+
+        const geminiResponse = await processGeminiResponse(result);
+        res.json({ transcript: transcript, summary: geminiResponse.text });
+    } catch (error) {
+        console.error("YouTube summarization error:", error);
+        res.status(500).json({ error: "Summarization failed" });
+    }
+});
+
 app.post("/summarize", async (req, res) => {
-  try {
-    const { transcript, level } = req.body;
-    if (!transcript) return res.status(400).json({ error: "No transcript provided" });
+    try {
+        const { transcript, level } = req.body;
+        if (!transcript) return res.status(400).json({ error: "No text provided" });
 
-    console.log("🔄 Summarizing text...");
-    const summary = await summarizeText(transcript, level);
-    console.log("✅ Summary Generated:", summary);
+        const chatSession = model.startChat({
+            generationConfig,
+            history: [],
+        });
 
-    res.json({ summary });
-  } catch (error) {
-    console.error("❌ Summarization error:", error.message);
-    res.status(500).json({ error: "Summarization failed" });
-  }
+        const prompt = `Provide a concise summary of the following text only, ensuring the output contains only the summary and no extra introductory phrases: ${transcript}. ${level === "core" ? "Make the summary very short and concise" : level === "concise" ? "Make a detailed summary" : "Make the summary in bullet points"}`;
+
+        const result = await chatSession.sendMessage(prompt);
+        const geminiResponse = await processGeminiResponse(result);
+        res.json(geminiResponse);
+    } catch (error) {
+        console.error("Gemini summarization error:", error);
+        res.status(500).json({ error: "Summarization failed" });
+    }
 });
 
-// 📂 **Route: Upload File and Summarize**
-app.post("/upload", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
-    const filePath = req.file.path;
+app.post("/transcribe-video", upload.single("video"), async (req, res) => {
+    try {
+        console.log("Received video upload request.");
 
-    let text = "";
-    if (req.file.mimetype === "application/pdf") {
-      const data = await pdfParse(fs.readFileSync(filePath));
-      text = data.text;
-    } else if (req.file.mimetype === "text/plain") {
-      text = fs.readFileSync(filePath, "utf-8");
-    } else {
-      return res.status(400).json({ error: "Unsupported file format" });
+        if (!req.file) {
+            console.log("No file received.");
+            return res.status(400).json({ error: "No video file uploaded" });
+        }
+
+        console.log("Received file:", req.file.originalname);
+
+        const audioFilePath = req.file.path;
+        const outputAudioPath = `${UPLOADS_DIR}/${Date.now()}.mp3`;
+
+        await new Promise((resolve, reject) => {
+            // Using explicit path to ffmpeg
+            exec(
+                `/opt/render/project/src/bin/ffmpeg -i "${audioFilePath}" -acodec mp3 "${outputAudioPath}"`,
+                (err, stdout, stderr) => {
+                    if (err) {
+                        console.error("ffmpeg error:", stderr);
+                        reject(new Error(`ffmpeg conversion failed: ${stderr}`));
+                    } else {
+                        console.log("ffmpeg successful");
+                        resolve();
+                    }
+                }
+            );
+        });
+
+        const transcript = await transcribeAudioAssemblyAI(outputAudioPath);
+        fs.unlinkSync(audioFilePath);
+        fs.unlinkSync(outputAudioPath);
+        res.json({ transcript });
+    } catch (error) {
+        console.error("Video transcription error:", error);
+        res.status(500).json({ error: error.message });
     }
+});
 
-    console.log("🔄 Summarizing uploaded file...");
-    const summary = await summarizeText(text, "concise");
-    console.log("✅ Summary Generated:", summary);
+app.post("/upload", upload.single("file"), async (req, res) => {
+    try {
+        const { level } = req.body;
+        if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-    fs.remove(filePath).catch((err) => console.error("❌ Failed to delete file:", err));
-    res.json({ summary });
-  } catch (error) {
-    console.error("❌ Error processing file:", error.message);
-    res.status(500).json({ error: "File processing failed" });
-  }
+        const filePath = req.file.path;
+        let fileContent = "";
+
+        if (req.file.mimetype === 'application/pdf') {
+            const dataBuffer = fs.readFileSync(filePath);
+            const pdfData = await pdfParse(dataBuffer);
+            fileContent = pdfData.text;
+            console.log("Successfully parsed PDF content.");
+        } else {
+            fileContent = fs.readFileSync(filePath, "utf-8");
+        }
+
+        const chatSession = model.startChat({
+            generationConfig,
+            history: [],
+        });
+
+        const prompt = `Provide a concise summary of the following content only, ensuring the output contains only the summary and no extra introductory phrases: ${fileContent}. ${level === "core" ? "Make the summary very short and concise" : level === "concise" ? "Make a detailed summary" : "Make the summary in bullet points"}`;
+
+        const result = await chatSession.sendMessage(prompt);
+        const geminiResponse = await processGeminiResponse(result);
+        res.json(geminiResponse);
+    } catch (error) {
+        console.error("Gemini file processing error:", error);
+        res.status(500).json({ error: "File processing failed" });
+    } finally {
+        if (req.file) {
+            fs.unlinkSync(req.file.path);
+        }
+    }
 });
 
 app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PORT}`));
